@@ -150,7 +150,6 @@ class model:
                 if evaluate_vertex_DC:
                     ''' Kubo's DC coefficients, bubble and corrections '''
                     self.DC_bubble_corr(L, deg, Gammas, omega0, eps2, scale)
-                    
                 if i > 0:
                     self.rho = rho_save
                     self.energije = energije_save
@@ -241,7 +240,6 @@ class model:
             l12q_old = 1.0
 
 
-            print(eps)
             while convergence_parameter > eps:
                 
                 Pi_w, Pi_eps_w = ht.precompute_bubbles(self.energije, Gamma, self.mu, self.Ts[-1], L, nodes, weights, [omega])
@@ -271,8 +269,8 @@ class model:
                 eps_l12 = np.abs(l12_new - l12_old)
                 eps_l12q0 = np.abs(l12q_0_new - l12q_0_old)
                 eps_l12q = np.abs(l12q_new - l12q_old)
-                eps = np.array([eps_l110, eps_l11, eps_l120, eps_l12, eps_l12q0, eps_l12q])
-                convergence_parameter = float((np.prod(eps))**(1/eps.shape[0]))
+                eps_inner = np.array([eps_l110, eps_l11, eps_l120, eps_l12, eps_l12q0, eps_l12q])
+                convergence_parameter = float((np.prod(eps_inner))**(1/eps_inner.shape[0]))
                 l11_0_old = l11_0_new
                 l11_old = l11_new
                 l12_0_old = l12_0_new
@@ -292,9 +290,9 @@ class model:
         self.L11_0.append(ht.to_scalar_if_single(l11_0))
         self.L11_corr.append(ht.to_scalar_if_single(l11))
         self.L12_0.append(ht.to_scalar_if_single(l12_0))
-        self.L12.append(ht.to_scalar_if_single(l12))
+        self.L12_corr.append(ht.to_scalar_if_single(l12))
         self.L12q_0.append(ht.to_scalar_if_single(l12q_0))
-        self.L12q.append(ht.to_scalar_if_single(l12q))
+        self.L12q_corr.append(ht.to_scalar_if_single(l12q))
 
     def optical_response(self, L, deg, Gamma, omegas):
         nodes, weights = np.polynomial.legendre.leggauss(deg)
