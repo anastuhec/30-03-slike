@@ -661,7 +661,7 @@ def Spektralka(epsilons, mu, energije, Gamma):
     Nk = energije.shape[1]
     Nepsilons = len(epsilons)
     A = np.zeros((Nepsilons, 2, Nk))
-    for i in prange(epsilons):
+    for i in prange(Nepsilons):
         for m in range(Nk):
             A_k = spektralna_k(epsilons[i], mu, energije[:,m], Gamma)
             A[i,:,m] = A_k
@@ -787,7 +787,7 @@ def rho_operators(K, phys_parameters, include_hartree):
             U_kdelta[1,1] = np.exp(1j*K*delta/2)
             Rho = np.einsum('ijx, jl, klx -> ikx', U_kdelta, sigmas[nu], U_kdelta.conj())
             rhos[ind] = Rho
-    return rhos, thetas
+    return rhos, -thetas
 
 ''' Fermi-Dirac function '''
 @njit
@@ -845,7 +845,7 @@ def Pi_bubble(omega, E_mk, E_nk, Gamma, mu, T, width, deps):
     chi_nm = chi_nm * deps
     return - chi_mn, - chi_nm
 
-@njit(parallel=True)
+@njit(cache=True)
 def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, L, nodes, weights):
     w = omega / Gamma
     e_mk = E_mk / Gamma
@@ -951,60 +951,94 @@ def chi_UV(Nk, U, V, pi_w, pi_eps_w, eps=False, reverse=False):
                         chi += U_mn * V_nm * pi_nm + U_nm * V_mn * pi_mn
     return chi / Nk
 
+def precompute_bubbles(energije, Gamma, mu, T, L, nodes, weights, omegas):
+    Nk = energije.shape[-1]
+    mu_ = mu / Gamma
+    invt = Gamma / T
+
+    Pi_w = np.zeros((len(omegas),2,2,2,Nk), dtype=np.complex128)
+    Pi_eps_w = np.zeros_like(Pi_w, dtype=np.complex128)
+
+    for i, omega in enumerate(omegas):
+        pi_w, pi_eps_w = Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, L, nodes, weights)
+        Pi_w[i] = pi_w
+        Pi_eps_w[i] = pi_eps_w
+    return Pi_w, Pi_eps_w
 
 ''' current-current, current-density, density-density corrections using a more complicated bubble (Pi_bubble, chi_UV),
 including their corrections '''
-def chi_jrho2(Nk, Nop, tok_tilde, rhos_tilde, mat_tilde, thetas, pi_w, pi_eps_w):
-    thetas = np.diag(thetas)
+def chi_jrho2(Pi_w, Pi_eps_w, rhos_tilde, thetas, tok_tilde, mat_tilde):
+    Nop = len(thetas)
+    thetas_diag = np.diag(thetas)
+    I = np.eye(Nop)
+    Nw = Pi_w.shape[0]
+    Nk = Pi_w.shape[-1]
 
-    ''' chi_j_j is bare current-current susceptibility (bubble) '''
-    chi_j_j = chi_UV(Nk, tok_tilde, tok_tilde, pi_w, pi_eps_w, )
-    chi_jE_j = chi_UV(Nk, tok_tilde, tok_tilde, pi_w, pi_eps_w, eps=True)
-    chi_jE2_j = chi_UV(Nk, mat_tilde, tok_tilde, pi_w, pi_eps_w)
-    ''' below we construct dchi_j_j, which is correction of the bubble,
-    for this we need rho-current and rho-rho susceptibilities in terms of bubbles '''
-    chi_rho_rho = np.zeros((Nop, Nop), dtype=np.complex128)
-    chi_rho_j = np.zeros(Nop, dtype=np.complex128)
-    chi_j_rho = np.zeros(Nop, dtype=np.complex128)
-    chi_jE_rho = np.zeros(Nop, dtype=np.complex128)
-    chi_jE2_rho = np.zeros(Nop, dtype=np.complex128)
-    for i in range(Nop):
-        chi_rho_j[i] = chi_UV(Nk, rhos_tilde[i], tok_tilde, pi_w, pi_eps_w)
-        chi_j_rho[i] = chi_UV(Nk, tok_tilde, rhos_tilde[i], pi_w, pi_eps_w)
-        chi_jE_rho[i] = chi_UV(Nk, tok_tilde, rhos_tilde[i], pi_w, pi_eps_w, eps=True)
-        chi_jE2_rho[i] = chi_UV(Nk, mat_tilde, rhos_tilde[i], pi_w, pi_eps_w)
-        for j in range(Nop):
-            chi_rho_rho[i,j] = chi_UV(Nk, rhos_tilde[i], rhos_tilde[j], pi_w, pi_eps_w)
+    Chi0 = np.zeros((Nop,Nop,Nw), dtype=np.complex128)
+    Chi = np.zeros_like(Chi0, dtype=np.complex128)
+    Chi_jj0 = np.zeros(Nw, dtype=np.complex128)
+    Chi_jrho0 = np.zeros((Nop, Nw), dtype=np.complex128)
+    Chi_rhoj0 = np.zeros_like(Chi_jrho0, dtype=np.complex128)
+    dChi_jj = np.zeros_like(Chi_jj0, dtype=np.complex128)
 
-    I = np.eye(Nop, dtype=np.complex128)
-    mat = I - chi_rho_rho @ np.diag(thetas)
-    inv = LA.inv(mat)
-    chi_rho_rho_renorm = inv @ chi_rho_rho
+    Chi_matj0 = np.zeros(Nw, dtype=np.complex128)
+    Chi_jEj0 = np.zeros(Nw, dtype=np.complex128)
 
-    dchi_j_j = chi_j_rho @ thetas @ inv @ chi_rho_j
-    dchi_jE_j = chi_jE_rho @ thetas @ inv @ chi_rho_j
-    dchi_jE2_j = chi_jE2_rho @ thetas @ inv @ chi_rho_j
+    Chi_matrho0 = np.zeros((Nop,Nw), dtype=np.complex128)
+    Chi_jErho0 = np.zeros((Nop,Nw), dtype=np.complex128)
 
-    results = {'j_j' : chi_j_j,
-               'dj_j' : dchi_j_j, 
-               'rho_j' : chi_rho_j,
-               'j_rho' : chi_j_rho,
-               'jE_j' : chi_jE_j,
-               'djE_j' : dchi_jE_j,
-               'jE2_j' : chi_jE2_j,
-               'djE2_j' : dchi_jE2_j,
-               'rho' : chi_rho_rho,
-               'rho_renorm' : chi_rho_rho_renorm
-                                             }
+    dChi_matj = np.zeros_like(Chi_matj0, dtype=np.complex128)
+    dChi_jEj = np.zeros_like(Chi_jEj0, dtype=np.complex128)
 
+    for om in range(Nw):
+        chi0 = np.zeros((Nop, Nop), dtype=np.complex128)
+        pi_w, pi_eps_w = Pi_w[om], Pi_eps_w[om]
+        for i in range(Nop):
+            for j in range(Nop):
+                chi0[i,j] = chi_UV(Nk, rhos_tilde[i], rhos_tilde[j], pi_w, pi_eps_w)
+        Chi0[:,:,om] = chi0
+
+        Chi_jj0[om] = chi_UV(Nk, tok_tilde, tok_tilde, pi_w, pi_eps_w)
+
+        Chi_matj0[om] = chi_UV(Nk, mat_tilde, tok_tilde, pi_w, pi_eps_w)
+
+        Chi_jEj0[om] = chi_UV(Nk, tok_tilde, tok_tilde, pi_w, pi_eps_w, eps=True)
+
+        for i in range(Nop):
+            Chi_jrho0[i,om] = chi_UV(Nk, tok_tilde, rhos_tilde[i], pi_w, pi_eps_w)
+            Chi_rhoj0[i,om] = chi_UV(Nk, rhos_tilde[i], tok_tilde, pi_w, pi_eps_w)
+            Chi_matrho0[i,om] = chi_UV(Nk, mat_tilde, rhos_tilde[i], pi_w, pi_eps_w)
+            Chi_jErho0[i,om] = chi_UV(Nk, tok_tilde, tok_tilde, pi_w, pi_eps_w, eps=True)
+
+
+        mat = I - chi0 @ thetas_diag
+        inv = LA.inv(mat)
+
+        Chi[:,:,om] = inv @ chi0
+
+        dChi_jj[om] = Chi_jrho0[:,om] @ thetas_diag @ inv @ Chi_rhoj0[:,om]
+        dChi_matj[om] = Chi_matrho0[:,om] @ thetas_diag @ inv @ Chi_rhoj0[:,om]
+        dChi_jEj[om] = Chi_jErho0[:,om] @ thetas_diag @ inv @ Chi_rhoj0[:,om]
+
+    results = {'chi0' : Chi0,
+               'chi' : Chi,
+
+               'chi_jj0' : Chi_jj0,
+               'dchi_jj' : dChi_jj,
+
+               'chi_jEj0' : Chi_jEj0,
+               'chi_matj0' : Chi_matj0,
+
+               'dchi_matj' : dChi_matj,
+               'dchi_jEj' : dChi_jEj}
     return results
 
 
 # ====== response and susceptibility obtained from simulation of a pulse ======
 
 ''' Gaussian pulse modulated by a cosine (in practice, however, I choose Omega=0, i.e. the pulse is a Gaussian ''' 
-def A_pulz(t, A0, t0, sigma, Omega):
-    return A0 * np.cos(Omega * t) * np.exp(-(t-t0)**2/(2*sigma**2))
+def A_pulz(t, A0, t0, sigma, Omega0):
+    return A0 * np.cos(Omega0 * t) * np.exp(-(t-t0)**2/(2*sigma**2))
 
 def build_U(H, dt):
     Nk = H.shape[-1]
@@ -1173,7 +1207,7 @@ def simulate_pulz(K, hk0, rho, phys_parameters, include_hartree,
     rho0 = np.copy(rho)
     H0 = h_k(K, hk0, rho0, phys_parameters, 0., include_hartree)
 
-    rho_expvals = np.zeros((N_points, Nop), dtype=np.complex128)
+    rho_expvals = np.zeros((Nop, N_points), dtype=np.complex128)
     rho_norms = np.zeros(N_points)
     Delta_bs = np.zeros(N_points, dtype=np.complex128)
     Delta_cs = np.zeros(N_points, dtype=np.complex128)
@@ -1260,7 +1294,7 @@ def simulate_pulz(K, hk0, rho, phys_parameters, include_hartree,
             measure_operators = np.concatenate(ops_list, axis=0)
 
         measurement_t = measure(Nk, Nop, measure_operators, rho)
-        rho_expvals[i] = measurement_t
+        rho_expvals[:,i] = measurement_t
         rho_norms[i] = norm(rho)
         Delta_bs[i], Delta_cs[i] = Delta(K, rho, Vb, Vc)
 
