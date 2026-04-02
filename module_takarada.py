@@ -239,7 +239,7 @@ class model:
             l12q_0_old = 1.0
             l12q_old = 1.0
 
-
+            print('-----')
             while convergence_parameter > eps:
                 
                 Pi_w, Pi_eps_w = ht.precompute_bubbles(self.energije, Gamma, self.mu, self.Ts[-1], L, nodes, weights, [omega])
@@ -269,7 +269,7 @@ class model:
                 eps_l12 = np.abs(l12_new - l12_old)
                 eps_l12q0 = np.abs(l12q_0_new - l12q_0_old)
                 eps_l12q = np.abs(l12q_new - l12q_old)
-                eps_inner = np.array([eps_l110, eps_l11, eps_l120, eps_l12, eps_l12q0, eps_l12q])
+                eps_inner = np.array([eps_l110/np.abs(l11_0_new), eps_l11/np.abs(l11_new), eps_l120/np.abs(l12_0_new), eps_l12/np.abs(l12_new), eps_l12q0/np.abs(l12q_0_new), eps_l12q/np.abs(l12q_new)])
                 convergence_parameter = float((np.prod(eps_inner))**(1/eps_inner.shape[0]))
                 l11_0_old = l11_0_new
                 l11_old = l11_new
@@ -279,6 +279,7 @@ class model:
                 l12q_old = l12q_new 
 
                 omega = omega / scale
+                print(convergence_parameter, flush=True)
 
             l11_0[g] = l11_0_old
             l11[g] = l11_old
@@ -325,7 +326,7 @@ class model:
                 "mean_energies": np.array(self.mean_energies),
                 "L11": np.array(self.L11),
                 "L12": np.array(self.L12),
-                "L22" : np.arrray(self.L22),
+                "L22" : np.array(self.L22),
                 "L12q": np.array(self.L12q),
                 "L11_boltz": np.array(self.L11_boltz),
                 "L12_boltz": np.array(self.L12_boltz),
@@ -337,5 +338,6 @@ class model:
                 "L12q_0": np.array(self.L12q_0),
                 "L12q_corr": np.array(self.L12q_corr),
                 "phys_parameters" : np.array(self.phys_parameters),
-                "Gammas": self.Gammas}
+                "Gammas": self.Gammas,
+                "include_hartree" : self.include_hartree}
         return data

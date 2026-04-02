@@ -2,7 +2,6 @@ import numpy as np
 import scipy.linalg as LA
 from numba import njit, prange
 from scipy.optimize import brentq
-import sys
 import module_takarada as mt
 from scipy.linalg import expm
 
