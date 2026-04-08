@@ -97,10 +97,8 @@ class model:
         Nomega = params['Nomega']
         eps = params['eps']
         eps2 = params['eps2']
-        L = params['L']
         deg = params['deg']
         omega0 = params['omega0']
-        scale = params['scale']
 
         self.Gammas = Gammas
         print('started', flush=True)
@@ -149,7 +147,7 @@ class model:
                 
                 if evaluate_vertex_DC:
                     ''' Kubo's DC coefficients, bubble and corrections '''
-                    self.DC_bubble_corr(L, deg, Gammas, omega0, eps2, scale)
+                    self.DC_bubble_corr(deg, Gammas, omega0, eps2)
                 if i > 0:
                     self.rho = rho_save
                     self.energije = energije_save
@@ -214,80 +212,53 @@ class model:
         self.L12_boltz.append(ht.to_scalar_if_single(l12_boltz))
 
         
-    def DC_bubble_corr(self, L, deg, Gammas, omega0, eps, scale):
+    def DC_bubble_corr(self, deg, Gammas, omega0, eps):
         nodes, weights = np.polynomial.legendre.leggauss(deg)
         Ngamma = len(Gammas)
+
         l11_0 = np.zeros(Ngamma)
         l12_0 = np.zeros_like(l11_0)
-        l12q_0 = np.zeros_like(l12_0)
+        l12q_0 = np.zeros_like(l11_0)
 
         l11 = np.zeros_like(l11_0)
         l12 = np.zeros_like(l11_0)
         l12q = np.zeros_like(l11_0)
 
         for g, Gamma in enumerate(Gammas):
+            mu_ = self.mu / Gamma
+            invt = Gamma / self.Ts[-1]
             
-            convergence_parameter = 1.0
-            omega = omega0
+            results = ht.compute_chi([omega0], self.Nk, Gamma, mu_, invt, nodes, weights, self.thetas, self.tok_tilde, self.mat_tilde, self.energije, self.rhos_tilde, verbose=False, eps=eps)
 
-            l11_0_old = 1.0
-            l11_old = 1.0
+            # Extract quantities
+            Chi_jj0 = results['chi_jj0'][0]
+            dChi_jj  = results['dchi_jj'][0]
+            Chi_jj = Chi_jj0 + dChi_jj
 
-            l12_0_old = 1.0
-            l12_old = 1.0
+            Chi_jEj0 = results['chi_jEj0'][0]
+            dChi_jEj = results['dchi_jEj'][0]
+            Chi_jEj = Chi_jEj0 + dChi_jEj
 
-            l12q_0_old = 1.0
-            l12q_old = 1.0
+            Chi_matj0 = results['chi_matj0'][0]
+            dChi_matj = results['dchi_matj'][0]
+            Chi_matj = Chi_matj0 + dChi_matj
 
-            print('-----')
-            while convergence_parameter > eps:
-                
-                Pi_w, Pi_eps_w = ht.precompute_bubbles(self.energije, Gamma, self.mu, self.Ts[-1], L, nodes, weights, [omega])
+            l11_0_new = (Chi_jj0.imag / omega0)
+            l11_new = (Chi_jj.imag / omega0)
 
-                results = ht.chi_jrho2(Pi_w, Pi_eps_w, self.rhos_tilde, self.thetas, self.tok_tilde, self.mat_tilde)
-                Chi_jj0 = results['chi_jj0'][0]
-                dChi_jj = results['dchi_jj'][0]
-                Chi_jj = Chi_jj0 + dChi_jj
-                l11_0_new = Chi_jj0.imag / omega
-                l11_new = Chi_jj.imag / omega
-                
-                Chi_jEj0 = results['chi_jEj0'][0]
-                dChi_jEj = results['dchi_jEj'][0]
-                Chi_jEj = Chi_jEj0 + dChi_jEj
-                l12_0_new = Chi_jEj0.imag / omega
-                l12_new = Chi_jEj.imag / omega
-            
-                Chi_matj0 = results['chi_matj0'][0]
-                dChi_matj = results['dchi_matj'][0]
-                Chi_matj = Chi_matj0 + dChi_matj
-                l12q_0_new = Chi_matj0.imag / omega
-                l12q_new = Chi_matj.imag / omega
+            l12_0_new = (Chi_jEj0.imag / omega0)
+            l12_new = (Chi_jEj.imag / omega0)
 
-                eps_l110 = np.abs(l11_0_new - l11_0_old)
-                eps_l11 = np.abs(l11_new - l11_old)
-                eps_l120 = np.abs(l12_0_new - l12_0_old)
-                eps_l12 = np.abs(l12_new - l12_old)
-                eps_l12q0 = np.abs(l12q_0_new - l12q_0_old)
-                eps_l12q = np.abs(l12q_new - l12q_old)
-                eps_inner = np.array([eps_l110/np.abs(l11_0_new), eps_l11/np.abs(l11_new), eps_l120/np.abs(l12_0_new), eps_l12/np.abs(l12_new), eps_l12q0/np.abs(l12q_0_new), eps_l12q/np.abs(l12q_new)])
-                convergence_parameter = float((np.prod(eps_inner))**(1/eps_inner.shape[0]))
-                l11_0_old = l11_0_new
-                l11_old = l11_new
-                l12_0_old = l12_0_new
-                l12_old = l12_new
-                l12q_0_old = l12q_0_new
-                l12q_old = l12q_new 
+            l12q_0_new = (Chi_matj0.imag / omega0)
+            l12q_new = (Chi_matj.imag / omega0)
 
-                omega = omega / scale
-                print(convergence_parameter, flush=True)
+            l11_0[g] = l11_0_new
+            l11[g] = l11_new
+            l12_0[g] = l12_0_new
+            l12[g] = l12_new
+            l12q_0[g] = l12q_0_new
+            l12q[g] = l12q_new
 
-            l11_0[g] = l11_0_old
-            l11[g] = l11_old
-            l12_0[g] = l12_0_old
-            l12[g] = l12_old
-            l12q_0[g] = l12q_0_old
-            l12q[g] = l12q_old
-                
         self.L11_0.append(ht.to_scalar_if_single(l11_0))
         self.L11_corr.append(ht.to_scalar_if_single(l11))
         self.L12_0.append(ht.to_scalar_if_single(l12_0))
@@ -295,10 +266,10 @@ class model:
         self.L12q_0.append(ht.to_scalar_if_single(l12q_0))
         self.L12q_corr.append(ht.to_scalar_if_single(l12q))
 
-    def optical_response(self, L, deg, Gamma, omegas):
+
+    def optical_response(self, deg, Gamma, omegas):
         nodes, weights = np.polynomial.legendre.leggauss(deg)
-        Pi_w, Pi_eps_w = ht.precompute_bubbles(self.energije, Gamma, self.mu, self.Ts[-1], L, nodes, weights, omegas)
-        results = ht.chi_jrho2(Pi_w, Pi_eps_w, self.rhos_tilde, self.thetas, self.tok_tilde, self.mat_tilde)
+        results = ht.compute_chi(omegas, self.Nk, Gamma, self.mu / Gamma, self.Ts[-1] / Gamma, nodes, weights, self.thetas, self.tok_tilde, self.mat_tilde, self.energije, self.rhos_tilde, verbose=False)
         return results
 
     def simulate_perturbation(self, A0, t0, sigma, Omega0, dt, t_max, Ncorr, tol, Gamma_, perturbation_operator, measure_provider, do_freeze):

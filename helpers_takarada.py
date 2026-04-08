@@ -2,6 +2,7 @@ import numpy as np
 import scipy.linalg as LA
 from numba import njit, prange
 from scipy.optimize import brentq
+import sys
 import module_takarada as mt
 from scipy.linalg import expm
 
@@ -169,12 +170,15 @@ def h_k(K, hk0, rho, phys_parameters, eps0, include_hartree):
     return hk
 
 ''' diagonalization of the hamiltonian '''
+import numpy as np
+from scipy import linalg as LA
+''' diagonalization of the hamiltonian '''
 def diagonalize(hamiltonian, K, T, mu):
     Nk = len(K)
     energije, vecs = np.zeros((2,Nk)), np.zeros((2,2,Nk), dtype=np.complex128)
     fs = np.zeros((2,2,Nk))
 
-    for i in [0, Nk//2]:
+    for i in range(Nk):
         en, v = LA.eigh(hamiltonian[:,:,i])
         energije[:,i] = en
         vecs[:,:,i] = v
@@ -183,18 +187,93 @@ def diagonalize(hamiltonian, K, T, mu):
         else:
             np.fill_diagonal(fs[:,:,i], 1/(1 + np.exp((en - mu)/T)))
 
-    for i in range(1, Nk//2):
-        en, v = LA.eigh(hamiltonian[:,:,i])
-        energije[:,i] = en
-        energije[:,-i] = en
-        vecs[:,:,i] = v
-        vecs[:,:,-i] = v.conj()
-        if T == 0:
-            np.fill_diagonal(fs[:, :, i], np.array([1, 0]))
-            np.fill_diagonal(fs[:, :, -i], np.array([1, 0]))
-        else:
-            np.fill_diagonal(fs[:,:,i], 1/(1 + np.exp((en - mu)/T)))
-            np.fill_diagonal(fs[:,:,-i], 1/(1 + np.exp((en - mu)/T)))
+    return energije, vecs, fs
+
+def diagonalize(hamiltonian, K, T, mu):
+    Nk = len(K)
+
+    # ── Batch diagonalize unique k-points: i = 0, 1, ..., Nk//2 ──────
+    # hamiltonian: (2, 2, Nk) -> np.linalg.eigh expects (batch, 2, 2)
+    H_batch = hamiltonian.transpose(2, 0, 1)                # (Nk, 2, 2)
+    n_unique = Nk // 2 + 1                                  # indices 0..Nk//2
+
+    en_batch, v_batch = np.linalg.eigh(H_batch[:n_unique])  # (n_unique, 2), (n_unique, 2, 2)
+
+    # ── Fill positive/unique half ──────────────────────────────────────
+    energije = np.zeros((2, Nk))
+    vecs     = np.zeros((2, 2, Nk), dtype=np.complex128)
+
+    energije[:, :n_unique] = en_batch.T                     # (2, n_unique)
+    vecs[:, :, :n_unique]  = v_batch.transpose(1, 2, 0)     # (2, 2, n_unique)
+
+    # ── Fill negative half by conjugate symmetry: i -> -i ─────────────
+    # indices 1..Nk//2-1 map to -1..-( Nk//2-1), i.e. Nk-1..Nk//2+1
+    if Nk // 2 - 1 > 0:
+        energije[:, Nk//2+1:] = energije[:, 1:Nk//2][:, ::-1]
+        vecs[:, :, Nk//2+1:]  = vecs[:, :, 1:Nk//2][:, :, ::-1].conj()
+
+    # ── Fermi-Dirac occupation matrices ───────────────────────────────
+    fs = np.zeros((2, 2, Nk))
+
+    if T == 0:
+        fs[0, 0, :] = 1.0
+        fs[1, 1, :] = 0.0
+    else:
+        fs[0, 0, :] = fd(energije[0, :], mu, T)
+        fs[1, 1, :] = fd(energije[1, :], mu, T)
+
+    return energije, vecs, fs
+                       
+def diagonalize_new(hamiltonian, K, T, mu):
+    Nk = len(K)
+    energije = np.zeros((2, Nk))
+    vecs     = np.zeros((2, 2, Nk), dtype=np.complex128)
+    fs       = np.zeros((2, 2, Nk))
+
+    # ── unique indices to diagonalize ──────────────────────────────────
+    # i=0 and i=Nk//2 are their own conjugates; i=1..Nk//2-1 are paired
+    unique_idx = np.array([0, Nk//2] + list(range(1, Nk//2)))  # shape (Nk//2 + 1,)
+
+    # ── batch diagonalize all unique k-points at once ──────────────────
+    # hamiltonian shape: (2, 2, Nk) → select unique → (N_unique, 2, 2)
+    H_unique = hamiltonian[:, :, unique_idx].transpose(2, 0, 1)  # (N_unique, 2, 2)
+
+    en_all, v_all = np.linalg.eigh(H_unique)   # (N_unique, 2), (N_unique, 2, 2)
+
+    # ── Fermi factors ──────────────────────────────────────────────────
+    if T == 0:
+        f_all = np.zeros_like(en_all)
+        f_all[:, 0] = 1.0                                  # lowest band filled
+    else:
+        f_all = 1.0 / (1.0 + np.exp((en_all - mu) / T))   # (N_unique, 2)
+
+    for k, i in enumerate([0, Nk//2]):
+        energije[:, i]  = en_all[k]
+        vecs[:, :, i]   = v_all[k].T          # (2,2)
+        fs[0, 0, i]     = f_all[k, 0]
+        fs[1, 1, i]     = f_all[k, 1]
+
+    # ── assign paired indices i=1..Nk//2-1 ────────────────────────────
+    paired_k   = np.arange(2, len(unique_idx))             # indices into en_all
+    paired_i   = np.arange(1, Nk//2)                       # indices into Nk
+
+    # energies: same for i and -i
+    energije[:, paired_i]  = en_all[paired_k].T            # (2, N_paired)
+    energije[:, -paired_i] = en_all[paired_k].T
+
+    # eigenvectors: v at i, conj(v) at -i
+    # v_all shape (N_unique, 2, 2) → transpose to (2, 2, N_unique)
+    v_paired               = v_all[paired_k].transpose(1, 2, 0)   # (2, 2, N_paired)
+    vecs[:, :,  paired_i]  = v_paired
+    vecs[:, :, -paired_i]  = v_paired.conj()
+
+    # Fermi factors: same for i and -i
+    f_paired               = f_all[paired_k].T             # (2, N_paired)
+    fs[0, 0,  paired_i]    = f_paired[0]
+    fs[1, 1,  paired_i]    = f_paired[1]
+    fs[0, 0, -paired_i]    = f_paired[0]
+    fs[1, 1, -paired_i]    = f_paired[1]
+
     return energije, vecs, fs
 
 ''' a single iteration in the self-consistency equation. rho --> rho_new  '''
@@ -257,8 +336,47 @@ def f_newmu(mu, hk0, rho, K, T, phys_parameters, eps0,
     #                           N_epsilon, include_hartree, mix, maxiter_fast=maxiter_fast)
     return n - 1
 
+def find_bracket(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
+                 epsilon_threshold, N_epsilon, maxiter, include_hartree, mix,
+                 max_expand=20, expand_factor=2.0):
+    """
+    Expand [mu1, mu2] outward until f(mu1) and f(mu2) have opposite signs.
+    """
+    args = (hk0, rho, K, T, phys_parameters, eps0,
+            epsilon_threshold, N_epsilon, maxiter, include_hartree, mix)
+    
+    f1 = f_newmu(mu1, *args)
+    f2 = f_newmu(mu2, *args)
+    
+    center = (mu1 + mu2) / 2.0
+    half_width = (mu2 - mu1) / 2.0
+
+    for i in range(max_expand):
+        if f1 * f2 < 0:
+            return mu1, mu2  # valid bracket found
+        
+        # Expand symmetrically
+        half_width *= expand_factor
+        mu1 = center - half_width
+        mu2 = center + half_width
+        
+        f1 = f_newmu(mu1, *args)
+        f2 = f_newmu(mu2, *args)
+            
+    raise ValueError(
+        f"Could not bracket root after {max_expand} expansions. "
+        f"Last: mu1={mu1:.4f}, f(mu1)={f1:.4f}, mu2={mu2:.4f}, f(mu2)={f2:.4f}"
+    )
+
 def NewMu2(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
              epsilon_threshold, N_epsilon, maxiter, include_hartree, mix=0.5, xtol=1e-4, rtol=1e-4, maxiterbrentq=50):
+    # Auto-fix bracket if needed
+    try:
+        mu1, mu2 = find_bracket(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
+                                epsilon_threshold, N_epsilon, maxiter, include_hartree, mix)
+    except ValueError as e:
+        print(f"Warning: {e}")
+        raise
     mu_star = brentq(f_newmu, mu1, mu2, args=(hk0, rho, K, T, phys_parameters, eps0,
                                               epsilon_threshold, N_epsilon, maxiter, include_hartree, mix),
                      xtol=xtol, rtol=rtol, maxiter=maxiterbrentq)
@@ -768,7 +886,7 @@ def rho_operators(K, phys_parameters, include_hartree):
             thetas = thetas[:4]
         nus = [0, 1, 2, 3]
     else:
-        thetas = np.array([-Vb/2, -Vb/2, -Vc/2, -Vc/2])
+        thetas = np.array([Vb/2, -Vb/2, -Vc/2, -Vc/2])
         if Vc == 0:
             thetas = thetas[:2]
         nus = [1, 2]
@@ -798,7 +916,6 @@ this form does not perform well numerically in the omega --> 0 limit '''
 @njit(cache=True)
 def Pi_bubble0(omega, E_mk, E_nk, Gamma, mu, T):
     return - (fd(E_mk, mu, T) - fd(E_nk, mu, T)) / (omega + E_mk - E_nk + 1j*2*Gamma)
-
 
 ''' retarded Green's function '''
 @njit
@@ -845,13 +962,17 @@ def Pi_bubble(omega, E_mk, E_nk, Gamma, mu, T, width, deps):
     return - chi_mn, - chi_nm
 
 @njit(cache=True)
-def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, L, nodes, weights):
+def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, nodes, weights, eps=1e-5):
     w = omega / Gamma
     e_mk = E_mk / Gamma
     e_nk = E_nk / Gamma
 
-    e_min = min(e_mk, e_nk - w, mu_) - L
-    e_max = max(e_mk, e_nk - w, mu_) + L
+    T = Gamma / invt
+
+    epsilon_max = np.sqrt(np.abs(np.arccosh(1/(eps*4*T))) * 2 * T) / Gamma
+
+    e_min = min(e_mk, e_nk - w, mu_) - epsilon_max
+    e_max = max(e_mk, e_nk - w, mu_) + epsilon_max
 
     mid = 0.5*(e_max + e_min)
     half = 0.5*(e_max - e_min)
@@ -865,7 +986,7 @@ def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, L, nodes, weights):
     invpi = 1. / np.pi
 
     n_nodes = len(nodes)
-    for i in prange(n_nodes):
+    for i in range(n_nodes):
         e = mid + half * nodes[i]
         ew = e + w
         dm = e - e_mk
@@ -902,15 +1023,14 @@ def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, L, nodes, weights):
 
     return half * res_mn / Gamma, half * res_nm / Gamma, half * res_w_mn, half * res_w_nm
 
-@njit(parallel=True, cache=True)
-def Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, L, nodes, weights):
+def Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, nodes, weights):
     pi = np.zeros((2,2,2,Nk), dtype=np.complex128)
     pi_eps = np.zeros_like(pi)
 
     for j in prange(Nk):
         for m in range(2):
             for n in range(m,2):
-                pi_mnk, pi_nmk, pie_mnk, pie_nmk = Pi_bubble_tilde(omega, energije[m,j], energije[n,j], Gamma, mu_, invt, L, nodes, weights,)
+                pi_mnk, pi_nmk, pie_mnk, pie_nmk = Pi_bubble_tilde(omega, energije[m,j], energije[n,j], Gamma, mu_, invt, nodes, weights,)
 
                 pi[m,n,0,j] = pi_mnk
                 pi[m,n,1,j] = pi_nmk
@@ -918,37 +1038,6 @@ def Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, L, nodes, weights):
                 pi_eps[m,n,1,j] = pie_nmk
 
     return pi, pi_eps
-
-@njit(parallel=True, cache=True)
-def chi_UV(Nk, U, V, pi_w, pi_eps_w, eps=False, reverse=False):
-    chi = np.complex64(0.0)
-
-    for j in prange(Nk):
-        for m in range(2):
-            for n in range(m,2):
-                
-                U_mn = U[m,n,j]
-                U_nm = U[n,m,j]
-                V_mn = V[m,n,j]
-                V_nm = V[n,m,j]
-
-                if eps:
-                    pi_mn = pi_eps_w[m,n,0,j]
-                    pi_nm = pi_eps_w[m,n,1,j]
-                else:
-                    pi_mn = pi_w[m,n,0,j]
-                    pi_nm = pi_w[m,n,1,j]
-                if reverse:                
-                    if m == n:
-                        chi += 0.5 * (U_mn * V_nm * pi_mn + U_nm * V_mn * pi_nm)
-                    else:
-                        chi += U_mn * V_nm * pi_mn + U_nm * V_mn * pi_nm
-                else:
-                    if m == n:
-                        chi += 0.5 * (U_mn * V_nm * pi_nm + U_nm * V_mn * pi_mn)
-                    else:
-                        chi += U_mn * V_nm * pi_nm + U_nm * V_mn * pi_mn
-    return chi / Nk
 
 def precompute_bubbles(energije, Gamma, mu, T, L, nodes, weights, omegas):
     Nk = energije.shape[-1]
@@ -959,7 +1048,7 @@ def precompute_bubbles(energije, Gamma, mu, T, L, nodes, weights, omegas):
     Pi_eps_w = np.zeros_like(Pi_w, dtype=np.complex128)
 
     for i, omega in enumerate(omegas):
-        pi_w, pi_eps_w = Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, L, nodes, weights)
+        pi_w, pi_eps_w = Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, nodes, weights)
         Pi_w[i] = pi_w
         Pi_eps_w[i] = pi_eps_w
     return Pi_w, Pi_eps_w
@@ -1007,7 +1096,7 @@ def chi_jrho2(Pi_w, Pi_eps_w, rhos_tilde, thetas, tok_tilde, mat_tilde):
             Chi_jrho0[i,om] = chi_UV(Nk, tok_tilde, rhos_tilde[i], pi_w, pi_eps_w)
             Chi_rhoj0[i,om] = chi_UV(Nk, rhos_tilde[i], tok_tilde, pi_w, pi_eps_w)
             Chi_matrho0[i,om] = chi_UV(Nk, mat_tilde, rhos_tilde[i], pi_w, pi_eps_w)
-            Chi_jErho0[i,om] = chi_UV(Nk, tok_tilde, tok_tilde, pi_w, pi_eps_w, eps=True)
+            Chi_jErho0[i,om] = chi_UV(Nk, tok_tilde, rhos_tilde[i], pi_w, pi_eps_w, eps=True)
 
 
         mat = I - chi0 @ thetas_diag
@@ -1406,3 +1495,282 @@ def DoS(K, energije, epsilons, mu, tok_tilde, faktor, shape='Gaussian'):
         for alpha in range(2):
             dos[alpha] += delta_approximation(epsilons - energije[alpha,k] + mu, sigma, shape) 
     return dos / Nk
+
+
+@njit(cache=True)
+def Pi_bubble_tilde_scalar(w, e_mk, e_nk, mu_, invt, L, nodes, weights):
+    """
+    Works in Gamma-normalized units: all inputs already divided by Gamma.
+    Returns pi_mn, pi_nm, piw_mn, piw_nm  (no Gamma factors — apply outside)
+    """
+    e_min = min(e_mk, e_nk - w, mu_) - L
+    e_max = max(e_mk, e_nk - w, mu_) + L
+
+    mid  = 0.5 * (e_max + e_min)
+    half = 0.5 * (e_max - e_min)
+
+    res_mn   = 0.0 + 0.0j
+    res_nm   = 0.0 + 0.0j
+    res_w_mn = 0.0 + 0.0j
+    res_w_nm = 0.0 + 0.0j
+
+    invpi   = 1.0 / np.pi
+    n_nodes = len(nodes)
+
+    for i in range(n_nodes):
+        e   = mid + half * nodes[i]
+        ew  = e + w
+        dm  = e - e_mk
+        dn  = e - e_nk
+        dmw = dm + w
+        dnw = dn + w
+        pref   = e - mu_ + 0.5 * w
+        weight = weights[i]
+
+        f  = 1.0 / (np.exp((e  - mu_) * invt) + 1.0)
+        fw = 1.0 / (np.exp((ew - mu_) * invt) + 1.0)
+
+        A_mk  = invpi / (dm  * dm  + 1.0)
+        A_nk  = invpi / (dn  * dn  + 1.0)
+        A_mkw = invpi / (dmw * dmw + 1.0)
+        A_nkw = invpi / (dnw * dnw + 1.0)
+
+        Grnw = 1.0 / (dnw + 1j)
+        Grmw = 1.0 / (dmw + 1j)
+        Gam  = 1.0 / (dm  - 1j)
+        Gan  = 1.0 / (dn  - 1j)
+
+        inte_mn_e = A_mk  * Grnw * f  + A_nkw * Gam * fw
+        inte_nm_e = A_nk  * Grmw * f  + A_mkw * Gan * fw
+
+        res_mn   -= weight * inte_mn_e
+        res_nm   -= weight * inte_nm_e
+        res_w_mn -= pref * weight * inte_mn_e
+        res_w_nm -= pref * weight * inte_nm_e
+
+    return half * res_mn, half * res_nm, half * res_w_mn, half * res_w_nm
+
+@njit(parallel=True, cache=True)
+def precompute_Pi_all(omega, energije, Gamma, mu_, invt, nodes, weights, eps=1e-5):
+    """
+    Precompute all Pi bubble values for all (m, n, j, i) at once.
+    Returns pi_mn, pi_nm, piw_mn, piw_nm each of shape (6, 6, Ny, Nx)
+    """
+    Nk = energije.shape[-1]
+
+    pi_mn  = np.zeros((2, 2, Nk), dtype=np.complex128)
+    pi_nm  = np.zeros((2, 2, Nk), dtype=np.complex128)
+    piw_mn = np.zeros((2, 2, Nk), dtype=np.complex128)
+    piw_nm = np.zeros((2, 2, Nk), dtype=np.complex128)
+
+    for j in prange(Nk):
+        for m in range(2):
+            for n in range(m, 2):
+
+                pi_mnk, pi_nmk, pie_mnk, pie_nmk = Pi_bubble_tilde(omega, energije[m,j], energije[n,j], Gamma, mu_, invt, nodes, weights, eps)
+
+                pi_mn [m, n, j] = pi_mnk
+                pi_nm [m, n, j] = pi_nmk
+                piw_mn[m, n, j] = pie_mnk
+                piw_nm[m, n, j] = pie_nmk
+    return pi_mn, pi_nm, piw_mn, piw_nm
+
+@njit(parallel=True, cache=True)
+def chi_UV(Nk, U, V, pi_mn, pi_nm):
+    """
+    Compute chi using precomputed Pi arrays.
+    No more calls to Pi_bubble_tilde inside the loop.
+    """
+    chi = 0.0 + 0.0j
+
+    for j in prange(Nk):
+        chi_j = 0.0 + 0.0j
+        for m in range(2):
+            for n in range(m, 2):
+
+                U_mn = U[m, n, j]
+                U_nm = U[n, m, j]
+                V_mn = V[m, n, j]
+                V_nm = V[n, m, j]
+
+                p_mn = pi_mn[m, n, j]  
+                p_nm = pi_nm[m, n, j]
+
+                if m == n:
+                    chi_j += 0.5 * (U_mn * V_nm * p_nm + U_nm * V_mn * p_mn)
+                else:
+                    chi_j += U_mn * V_nm * p_nm + U_nm * V_mn * p_mn
+
+        chi += chi_j
+
+    return chi / Nk
+
+def compute_single_om_fused(
+    om,
+    Nk, Gamma, mu_, invt, nodes, weights,
+    thetas, tok_tilde, mat_tilde,
+    energije,
+    rhos_tilde, eps=1e-5
+):
+    Nop         = len(thetas)
+    thetas_diag = np.diag(thetas)
+    I           = np.eye(Nop)
+
+    # ── ONE precomputation pass for this omega ──────────────────────────
+    pi_mn, pi_nm, piw_mn, piw_nm = precompute_Pi_all(
+        om, energije, Gamma, mu_, invt, nodes, weights, eps
+    )
+
+    # ── chi0 matrix  (Nop x Nop calls, but now cheap) ──────────────────
+    chi0 = np.zeros((Nop, Nop), dtype=np.complex128)
+    for i in range(Nop):
+        for j in range(Nop):
+            chi0[i, j] = chi_UV(Nk, rhos_tilde[i], rhos_tilde[j], pi_mn, pi_nm)
+
+    # ── chi_jj0 ────────────────────────────────────────────────────────
+    chi_jj0 = chi_UV(Nk, tok_tilde, tok_tilde, pi_mn, pi_nm)
+    chi_jEj0 = chi_UV(Nk, tok_tilde, tok_tilde, piw_mn, piw_nm)
+    chi_matj0 = chi_UV(Nk, mat_tilde, tok_tilde, pi_mn, pi_nm)
+
+    # ── chi_jrho0 / chi_rhoj0 ──────────────────────────────────────────
+    chi_jrho0 = np.zeros(Nop, dtype=np.complex128)
+    chi_rhoj0 = np.zeros(Nop, dtype=np.complex128)
+    chi_jErho0 = np.zeros(Nop, dtype=np.complex128)
+    chi_matrho0 = np.zeros(Nop, dtype=np.complex128)
+    for i in range(Nop):
+        chi_jrho0[i] = chi_UV(Nk, tok_tilde,    rhos_tilde[i], pi_mn, pi_nm)
+        chi_rhoj0[i] = chi_UV(Nk, rhos_tilde[i], tok_tilde,    pi_mn, pi_nm)
+        chi_jErho0[i] = chi_UV(Nk, tok_tilde,    rhos_tilde[i], piw_mn, piw_nm)
+        chi_matrho0[i] = chi_UV(Nk, mat_tilde, rhos_tilde[i], pi_mn, pi_nm)
+
+    # ── RPA ────────────────────────────────────────────────────────────
+    mat     = I - chi0 @ thetas_diag
+    inv     = LA.inv(mat)
+    chi_rpa = inv @ chi0
+    dchi_jj = chi_jrho0 @ thetas_diag @ inv @ chi_rhoj0
+    dchi_jEj = chi_jErho0 @ thetas_diag @ inv @ chi_rhoj0
+    dchi_matj = chi_matrho0 @ thetas_diag @ inv @ chi_rhoj0
+
+    return om, chi0, chi_rpa, chi_jj0, dchi_jj, chi_jEj0, dchi_jEj, chi_matj0, dchi_matj
+
+
+from tqdm import tqdm
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def compute_chi(
+    omegas,
+    Nk, Gamma, mu_, invt, nodes, weights,
+    thetas, tok_tilde, mat_tilde,
+    energije,
+    rhos_tilde,
+    verbose=True,
+    n_workers=None, eps=1e-5 # None = number of CPUs
+):
+    omegas = np.asarray(omegas)
+    N_om   = len(omegas)
+    Nop    = len(thetas)
+
+    chi0_arr      = np.zeros((N_om, Nop, Nop), dtype=np.complex128)
+    chi_rpa_arr   = np.zeros((N_om, Nop, Nop), dtype=np.complex128)
+    chi_jj0_arr   = np.zeros(N_om,             dtype=np.complex128)
+    dchi_jj_arr   = np.zeros(N_om,             dtype=np.complex128)
+    chi_matj0_arr = np.zeros(N_om, dtype=np.complex128)
+    chi_jEj0_arr = np.zeros(N_om, dtype=np.complex128)
+    dchi_matj_arr = np.zeros(N_om, dtype=np.complex128)
+    dchi_jEj_arr = np.zeros(N_om, dtype=np.complex128)
+
+    t_total = time.time()
+
+    def _worker(om_idx, om):
+        result = compute_single_om_fused(
+            om,        # om = frequency value, omegas = full array
+            Nk, Gamma, mu_, invt, nodes, weights,
+            thetas, tok_tilde, mat_tilde,
+            energije, rhos_tilde, eps
+        )
+        return om_idx, result # don't forget t0
+
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        futures = {
+            executor.submit(_worker, om_idx, om): om_idx
+            for om_idx, om in enumerate(omegas)
+        }
+
+        with tqdm(total=N_om, desc="omegas", disable=not verbose) as pbar:
+            for future in as_completed(futures):
+                om_idx, result = future.result()
+                om, chi0, chi_rpa, chi_jj0, dchi_jj, chi_jEj0, dchi_jEj, chi_matj0, dchi_matj = result
+
+                chi0_arr[om_idx]      = chi0
+                chi_rpa_arr[om_idx]   = chi_rpa
+                chi_jj0_arr[om_idx]   = chi_jj0
+                dchi_jj_arr[om_idx]   = dchi_jj
+                chi_jEj0_arr[om_idx] = chi_jEj0
+                dchi_jEj_arr[om_idx] = dchi_jEj
+                chi_matj0_arr[om_idx] = chi_matj0
+                dchi_matj_arr[om_idx] = dchi_matj
+
+                if verbose:
+                    print(
+                        f"  [om {om_idx+1}/{N_om}]",
+                        flush=True
+                    )
+                pbar.update(1)
+
+    if verbose:
+        print(f"\nTotal time: {time.time() - t_total:.2f}s")
+
+    results = {'chi0' : chi0_arr,
+               'chi' : chi_rpa_arr,
+
+               'chi_jj0' : chi_jj0_arr,
+               'dchi_jj' : dchi_jj_arr,
+
+               'chi_jEj0' : chi_jEj0_arr,
+               'chi_matj0' : chi_matj0_arr,
+
+               'dchi_matj' : dchi_matj_arr,
+               'dchi_jEj' : dchi_jEj_arr}
+    
+    return results
+
+
+def recommend_L_deg(invt, mu_, bandwidth=None, alpha_L=8.0, alpha_deg=10.0, deg_min=50):
+    """
+    Recommend L and deg for given temperature (invt = Gamma/T).
+    
+    Parameters
+    ----------
+    invt      : float   1/T in Gamma-normalized units
+    mu_       : float   chemical potential / Gamma
+    bandwidth : float   half-bandwidth / Gamma (if known), else None
+    alpha_L   : float   how many thermal lengths to include (5-10)
+    alpha_deg : float   points per sharpest feature
+    deg_min   : int     minimum quadrature degree
+    """
+    T = 1.0 / invt if invt > 0 else np.inf
+
+    # ── L: must cover thermal window + Lorentzian tails ──────────────
+    thermal_L = alpha_L * max(T, 1.0)           # 1.0 = Gamma in norm. units
+    mu_offset = abs(mu_)                         # shift from band center
+    
+    if bandwidth is not None:
+        L = max(thermal_L, bandwidth + mu_offset + 5.0)
+    else:
+        L = thermal_L + mu_offset + 5.0          # +5 for Lorentzian tails
+
+    # ── deg: points per sharpest feature, scaled by L ────────────────
+    sharpest = max(1.0, 1.0 / invt)             # min(1, T) in Gamma units
+    # but at low T, sharpest = 1 (Lorentzian), not 1/invt
+    # Fermi step only matters if T < Gamma, i.e. invt > 1
+    if invt > 1.0:
+        sharpest = 1.0                           # Lorentzian dominates
+    else:
+        sharpest = T                             # Fermi step dominates
+
+    deg = int(alpha_deg * L / sharpest)
+    deg = max(deg, deg_min)
+
+    return L, deg
