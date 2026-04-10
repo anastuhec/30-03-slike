@@ -1,4 +1,5 @@
 import numpy as np
+from numpy.polynomial.legendre import leggauss
 import sys
 sys.path.append("/Users/ana/Desktop/takarada/")
 import helpers_takarada as ht
@@ -40,7 +41,8 @@ class model:
         self.L12 = []
         self.L22 = []
         self.L12q = []
-        
+        self.L22q = []
+
         self.L11_boltz = []
         self.L12_boltz  = []
         self.L22_boltz = []
@@ -99,7 +101,8 @@ class model:
         eps2 = params['eps2']
         deg = params['deg']
         omega0 = params['omega0']
-
+        if evaluate_vertex_DC:
+            nodes, weights = leggauss(deg)
         self.Gammas = Gammas
         print('started', flush=True)
         for i, beta in enumerate(betas):
@@ -147,7 +150,7 @@ class model:
                 
                 if evaluate_vertex_DC:
                     ''' Kubo's DC coefficients, bubble and corrections '''
-                    self.DC_bubble_corr(deg, Gammas, omega0, eps2)
+                    self.DC_bubble_corr(nodes, weights, Gammas, omega0, eps2)
                 if i > 0:
                     self.rho = rho_save
                     self.energije = energije_save
@@ -165,12 +168,14 @@ class model:
         spektralka = ht.Spektralka(epsilons, self.mu, self.energije, Gamma)
         phi = ht.phi_Kubo(self.K, self.tok_tilde, self.tok_tilde, spektralka, epsilons)
         phiQ = ht.phi_Kubo(self.K, self.mat_tilde, self.tok_tilde, spektralka, epsilons)
+        phiQ2 = ht.phi_Kubo(self.K, self.mat_tilde, self.mat_tilde, spektralka, epsilons)
 
         l11 = np.pi * ht.integral_omega(phi * mfd1, epsilons)
         l12 = np.pi * ht.integral_omega(epsilons * phi * mfd1, epsilons)
         l22 = np.pi * ht.integral_omega(epsilons**2 * phi * mfd1, epsilons)
         l12q = np.pi * ht.integral_omega(phiQ * mfd1, epsilons)
-        return l11, l12, l22, l12q
+        l22q = np.pi * ht.integral_omega(phiQ2 * mfd1, epsilons) + 2 * np.pi * ht.integral_omega(phiQ * epsilons * mfd1, epsilons)
+        return l11, l12, l22, l12q, l22q
 
     def DC_coefficients(self, eps, Nomega, Gammas):
         T = self.Ts[-1]
@@ -186,17 +191,19 @@ class model:
         l12 = np.zeros(Ngamma)
         l22 = np.zeros(Ngamma)
         l12q = np.zeros(Ngamma)
+        l22q = np.zeros(Ngamma)
 
         l11_boltz = np.zeros(Ngamma)
         l22_boltz = np.zeros(Ngamma)
         l12_boltz = np.zeros(Ngamma)
 
         for g, Gamma in enumerate(Gammas):
-            l11_, l12_, l22_, l12q_ = self.ls_kubo(epsilons, Gamma, mfd1)
+            l11_, l12_, l22_, l12q_, l22q_ = self.ls_kubo(epsilons, Gamma, mfd1)
             l11[g] = l11_.real
             l22[g] = l22_.real
             l12[g] = l12_.real
             l12q[g] = l12q_.real
+            l22q[g] = l22q_.real
 
             l11_boltz[g] = K0b / (2 * Gamma)
             l22_boltz[g] = K0b / (2 * Gamma)
@@ -206,14 +213,14 @@ class model:
         self.L12.append(ht.to_scalar_if_single(l12))
         self.L22.append(ht.to_scalar_if_single(l22))
         self.L12q.append(ht.to_scalar_if_single(l12q))
+        self.L22q.append(ht.to_scalar_if_single(l22q))
 
         self.L11_boltz.append(ht.to_scalar_if_single(l11_boltz))
         self.L22_boltz.append(ht.to_scalar_if_single(l22_boltz))
         self.L12_boltz.append(ht.to_scalar_if_single(l12_boltz))
 
         
-    def DC_bubble_corr(self, deg, Gammas, omega0, eps):
-        nodes, weights = np.polynomial.legendre.leggauss(deg)
+    def DC_bubble_corr(self, nodes, weights, Gammas, omega0, eps):
         Ngamma = len(Gammas)
 
         l11_0 = np.zeros(Ngamma)
@@ -228,36 +235,31 @@ class model:
             mu_ = self.mu / Gamma
             invt = Gamma / self.Ts[-1]
             
-            results = ht.compute_chi([omega0], self.Nk, Gamma, mu_, invt, nodes, weights, self.thetas, self.tok_tilde, self.mat_tilde, self.energije, self.rhos_tilde, verbose=False, eps=eps)
+            results = ht.compute_chi(omega0, self.Nk, Gamma, mu_, invt, nodes, weights, self.thetas, self.tok_tilde, self.mat_tilde, self.energije, self.rhos_tilde, verbose=False, eps=eps)
 
-            # Extract quantities
-            Chi_jj0 = results['chi_jj0'][0]
-            dChi_jj  = results['dchi_jj'][0]
+            Chi_jj0 = results['chi_jj0'].imag
+            dChi_jj  = results['dchi_jj'].imag
             Chi_jj = Chi_jj0 + dChi_jj
+            left, right = ht.find_flat_regime(omega0, Chi_jj0)
+            l11_0[g] = ht.get_dc_coefficient(omega0[left:right], Chi_jj0[left:right])[0]
+            left, right = ht.find_flat_regime(omega0, Chi_jj)
+            l11[g] = ht.get_dc_coefficient(omega0[left:right], Chi_jj[left:right])[0]
 
-            Chi_jEj0 = results['chi_jEj0'][0]
-            dChi_jEj = results['dchi_jEj'][0]
+            Chi_jEj0 = results['chi_jEj0'].imag
+            dChi_jEj = results['dchi_jEj'].imag
             Chi_jEj = Chi_jEj0 + dChi_jEj
+            left, right = ht.find_flat_regime(omega0, Chi_jEj0)
+            l12_0[g] = ht.get_dc_coefficient(omega0[left:right], Chi_jEj0[left:right])[0]
+            left, right = ht.find_flat_regime(omega0, Chi_jEj)
+            l12[g] = ht.get_dc_coefficient(omega0[left:right], Chi_jEj[left:right])[0]
 
-            Chi_matj0 = results['chi_matj0'][0]
-            dChi_matj = results['dchi_matj'][0]
+            Chi_matj0 = results['chi_matj0'].imag
+            dChi_matj = results['dchi_matj'].imag
             Chi_matj = Chi_matj0 + dChi_matj
-
-            l11_0_new = (Chi_jj0.imag / omega0)
-            l11_new = (Chi_jj.imag / omega0)
-
-            l12_0_new = (Chi_jEj0.imag / omega0)
-            l12_new = (Chi_jEj.imag / omega0)
-
-            l12q_0_new = (Chi_matj0.imag / omega0)
-            l12q_new = (Chi_matj.imag / omega0)
-
-            l11_0[g] = l11_0_new
-            l11[g] = l11_new
-            l12_0[g] = l12_0_new
-            l12[g] = l12_new
-            l12q_0[g] = l12q_0_new
-            l12q[g] = l12q_new
+            left, right = ht.find_flat_regime(omega0, Chi_matj0)
+            l12q_0[g] = ht.get_dc_coefficient(omega0[left:right], Chi_matj0[left:right])[0]
+            left, right = ht.find_flat_regime(omega0, Chi_matj)
+            l12q[g] = ht.get_dc_coefficient(omega0[left:right], Chi_matj[left:right])[0]
 
         self.L11_0.append(ht.to_scalar_if_single(l11_0))
         self.L11_corr.append(ht.to_scalar_if_single(l11))
@@ -268,7 +270,7 @@ class model:
 
 
     def optical_response(self, deg, Gamma, omegas):
-        nodes, weights = np.polynomial.legendre.leggauss(deg)
+        nodes, weights = leggauss(deg)
         results = ht.compute_chi(omegas, self.Nk, Gamma, self.mu / Gamma, self.Ts[-1] / Gamma, nodes, weights, self.thetas, self.tok_tilde, self.mat_tilde, self.energije, self.rhos_tilde, verbose=False)
         return results
 
@@ -299,6 +301,7 @@ class model:
                 "L12": np.array(self.L12),
                 "L22" : np.array(self.L22),
                 "L12q": np.array(self.L12q),
+                "L22q" : np.array(self.L22q),
                 "L11_boltz": np.array(self.L11_boltz),
                 "L12_boltz": np.array(self.L12_boltz),
                 "L22_boltz": np.array(self.L22_boltz),
