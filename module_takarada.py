@@ -11,6 +11,7 @@ class model:
         self.Nk = Nk
         self.parameters1 = parameters1
         self.parameters2 = parameters2
+        self.n_target = parameters1['n_target']
         self.phys_parameters = phys_parameters
         _, _, _, _, _, _, Vb, Vc, _ = phys_parameters
         self.Vb, self.Vc = Vb, Vc
@@ -83,7 +84,7 @@ class model:
         maxiter = parameters['maxiter']
         n_pass = parameters['n_pass']
         
-        mu, rho, err, energije, vecs, fs, n = ht.NewMu2(self.mu - dmu, self.mu + dmu, self.hk0, self.rho, self.K, T, self.phys_parameters, eps0, epsilon_threshold, N_epsilon, maxiter, self.include_hartree, mix=0.5, xtol=n_pass, rtol=n_pass, maxiterbrentq=maxbrentq)
+        mu, rho, err, energije, vecs, fs, n = ht.NewMu2(self.mu - dmu, self.mu + dmu, self.hk0, self.rho, self.K, T, self.phys_parameters, eps0, epsilon_threshold, N_epsilon, maxiter, self.include_hartree, mix=0.5, xtol=n_pass, rtol=n_pass, maxiterbrentq=maxbrentq, n_target=self.n_target)
     
         self.rho = rho
         self.energije = energije
