@@ -2,7 +2,6 @@ import numpy as np
 import scipy.linalg as LA
 from numba import njit, prange
 from scipy.optimize import brentq
-import sys
 import module_takarada as mt
 from scipy.linalg import expm
 
@@ -569,14 +568,14 @@ def compute_all_mf_matrices(K, rho, geom, phases, g_ffts):
                 suma = np.sum(rho[orb2,orb1,:] * phase_k)
                 M6[orb1_,orb1_] += -1j * t * V_ * lega * suma / Nk
 
-                # ---------- M4a ---------- (matrix3)
+                # ---------- M4a ---------- (matrix3) - fourth term in equation
                 #g = -1j * V_ * lega * np.conj(phase_k) * phases["int"][m]
                 g_fft = -1j * V_ * lega * g_ffts_M4a1[l,m,:] #np.fft.fft(np.fft.ifftshift(g))
                 gh = np.fft.fftshift(
                         np.fft.ifft(g_fft * rho_fft[(orb1_,orb1)]))
                 M4a[orb1_,orb2] += fk * gh
 
-                # ---------- M4b ---------- (matrix4)
+                # ---------- M4b ---------- (matrix4) - third term in equation
                 h = fk * rho[orb2,orb1_,:]
                 h_fft = np.fft.fft(np.fft.ifftshift(h))
                 g_fft = -1j * V_ * lega * g_ffts_M4b1[l,m,:]
@@ -596,14 +595,14 @@ def compute_all_mf_matrices(K, rho, geom, phases, g_ffts):
                 suma = np.sum(rho[orb2,orb1,:] * phase_k)
                 M6[orb1_,orb1_] += +1j * t * V_ * lega * suma / Nk
 
-                # ---------- M4a ----------
+                # ---------- M4a ---------- fourth term in equation
                 #g = +1j * V_ * lega * phases["int"][m]
                 g_fft = +1j * V_ * lega * g_ffts_M4a2[l,m,:] #np.fft.fft(np.fft.ifftshift(g))
                 gh = np.fft.fftshift(
                         np.fft.ifft(g_fft * rho_fft[(orb1_,orb1)]))
                 M4a[orb1_,orb2] += fk * gh
 
-                # ---------- M4b ----------
+                # ---------- M4b ---------- third term in equation
                 #g = +1j * V_ * lega * np.conj(phases["int"][m])
                 g_fft = +1j * V_ * lega * g_ffts_M4b2[l,m,:]#np.fft.fft(np.fft.ifftshift(g))
                 h = fk * rho[orb2,orb1_,:]
@@ -962,66 +961,109 @@ def Pi_bubble(omega, E_mk, E_nk, Gamma, mu, T, width, deps):
     return - chi_mn, - chi_nm
 
 @njit(cache=True)
-def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, nodes, weights, eps=1e-5):
-    w = omega / Gamma
-    e_mk = E_mk / Gamma
-    e_nk = E_nk / Gamma
+def Pi_bubble_tilde(omega, E_mk, E_nk, Gamma, mu_, invt, nodes, weights, eps=1e-5, n_eps=1.0):
+    w    = omega / Gamma
+    e_mk = E_mk  / Gamma
+    e_nk = E_nk  / Gamma
+    T    = Gamma / invt
 
-    T = Gamma / invt
+    invpi = 1.0 / np.pi
 
-    epsilon_max = np.sqrt(np.abs(np.arccosh(1/(eps*4*T))) * 2 * T) / Gamma
+    # Single, T-independent cutoff based on Lorentzian tail
+    # A(e) ~ 1/(pi * e^2) < eps  =>  e > 1/(pi*eps)
+    epsilon_max = np.sqrt(max(1.0/(np.pi * eps) - 1.0, 0.0)) * n_eps
 
-    e_min = min(e_mk, e_nk - w, mu_) - epsilon_max
-    e_max = max(e_mk, e_nk - w, mu_) + epsilon_max
+    # Three integration intervals, one per peak
+    centers = np.array([e_mk, e_nk - w, mu_])
 
-    mid = 0.5*(e_max + e_min)
-    half = 0.5*(e_max - e_min)
-    
-    res_mn = 0.0 + 0.0*1j
-    res_nm = 0.0 + 0.0*1j
+    # Build, sort, merge intervals (same as your new code)
+    raw = np.empty((3, 2), dtype=np.float64)
+    for c in range(3):
+        raw[c, 0] = centers[c] - epsilon_max
+        raw[c, 1] = centers[c] + epsilon_max
 
-    res_w_mn = 0.0 + 0.0*1j
-    res_w_nm = 0.0 + 0.0*1j
+    # Sort by left endpoint
+    for i in range(3):
+        for j in range(i + 1, 3):
+            if raw[j, 0] < raw[i, 0]:
+                raw[i, 0], raw[j, 0] = raw[j, 0], raw[i, 0]
+                raw[i, 1], raw[j, 1] = raw[j, 1], raw[i, 1]
 
-    invpi = 1. / np.pi
+    # Merge overlapping intervals
+    merged  = np.empty((3, 2), dtype=np.float64)
+    merged[0, 0] = raw[0, 0]
+    merged[0, 1] = raw[0, 1]
+    n_merged = 1
+    for i in range(1, 3):
+        if raw[i, 0] <= merged[n_merged - 1, 1]:
+            merged[n_merged - 1, 1] = max(raw[i, 1], merged[n_merged - 1, 1])
+        else:
+            merged[n_merged, 0] = raw[i, 0]
+            merged[n_merged, 1] = raw[i, 1]
+            n_merged += 1
 
-    n_nodes = len(nodes)
-    for i in range(n_nodes):
-        e = mid + half * nodes[i]
-        ew = e + w
-        dm = e - e_mk
-        dn = e - e_nk
-        dmw = dm + w
-        dnw = dn + w
-        pref = e - mu_ + 0.5*w
+    # Integrate over merged intervals
+    n_nodes  = len(nodes)
 
-        weight = weights[i]
+    res_mn_r = 0.0; res_mn_i = 0.0
+    res_nm_r = 0.0; res_nm_i = 0.0
+    res_w_mn_r = 0.0; res_w_mn_i = 0.0
+    res_w_nm_r = 0.0; res_w_nm_i = 0.0
 
-        f = 1. / (np.exp((e - mu_) * invt) + 1.)
-        fw = 1. / (np.exp((ew - mu_) * invt) + 1.)
+    for s in range(n_merged):
+        a    = merged[s, 0]
+        b    = merged[s, 1]
+        mid  = 0.5 * (a + b)
+        half = 0.5 * (b - a)
 
-        A_mk = invpi / (dm*dm + 1.)
-        A_nk = invpi / (dn*dn + 1.)
-        A_mkw = invpi / (dmw*dmw + 1.)
-        A_nkw = invpi / (dnw*dnw + 1.)
+        for i in range(n_nodes):
+            e   = mid + half * nodes[i]
+            ew  = e + w
+            dm  = e - e_mk
+            dn  = e - e_nk
+            dmw = dm + w
+            dnw = dn + w
+            pref = e - mu_ + 0.5 * w
+            wi   = weights[i] * half
 
-        Grnw = 1. / (dnw + 1j)
-        Grmw = 1. / (dmw + 1j)
+            f  = 1.0 / (np.exp((e  - mu_) * invt) + 1.0)
+            fw = 1.0 / (np.exp((ew - mu_) * invt) + 1.0)
 
-        Gam = 1. / (dm - 1j)
-        Gan = 1. / (dn - 1j)
+            A_mk  = invpi / (dm  * dm  + 1.0)
+            A_nk  = invpi / (dn  * dn  + 1.0)
+            A_mkw = invpi / (dmw * dmw + 1.0)
+            A_nkw = invpi / (dnw * dnw + 1.0)
 
-        inte_mn_e = A_mk * Grnw * f + A_nkw * Gam * fw
-        inte_nm_e = A_nk * Grmw * f + A_mkw * Gan * fw
-    
-    
-        res_mn += - weight * inte_mn_e
-        res_nm += - weight * inte_nm_e
+            Grnw_r =  dnw / (dnw * dnw + 1.0)
+            Grnw_i = -1.0 / (dnw * dnw + 1.0)
+            Grmw_r =  dmw / (dmw * dmw + 1.0)
+            Grmw_i = -1.0 / (dmw * dmw + 1.0)
+            Gam_r  =  dm  / (dm  * dm  + 1.0)
+            Gam_i  =  1.0 / (dm  * dm  + 1.0)
+            Gan_r  =  dn  / (dn  * dn  + 1.0)
+            Gan_i  =  1.0 / (dn  * dn  + 1.0)
 
-        res_w_mn += - pref * weight * inte_mn_e
-        res_w_nm += - pref * weight * inte_nm_e
+            mn_r = A_mk * Grnw_r * f + A_nkw * Gam_r * fw
+            mn_i = A_mk * Grnw_i * f + A_nkw * Gam_i * fw
+            nm_r = A_nk * Grmw_r * f + A_mkw * Gan_r * fw
+            nm_i = A_nk * Grmw_i * f + A_mkw * Gan_i * fw
 
-    return half * res_mn / Gamma, half * res_nm / Gamma, half * res_w_mn, half * res_w_nm
+            res_mn_r   += -wi * mn_r
+            res_mn_i   += -wi * mn_i
+            res_nm_r   += -wi * nm_r
+            res_nm_i   += -wi * nm_i
+            res_w_mn_r += -wi * pref * mn_r
+            res_w_mn_i += -wi * pref * mn_i
+            res_w_nm_r += -wi * pref * nm_r
+            res_w_nm_i += -wi * pref * nm_i
+
+    res_mn   = (res_mn_r   + 1j * res_mn_i)   / Gamma
+    res_nm   = (res_nm_r   + 1j * res_nm_i)   / Gamma
+    res_w_mn =  res_w_mn_r + 1j * res_w_mn_i
+    res_w_nm =  res_w_nm_r + 1j * res_w_nm_i
+
+    return res_mn, res_nm, res_w_mn, res_w_nm
+
 
 def Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, nodes, weights):
     pi = np.zeros((2,2,2,Nk), dtype=np.complex128)
@@ -1039,7 +1081,7 @@ def Pi_bubble_tilde_w(Nk, omega, energije, Gamma, mu_, invt, nodes, weights):
 
     return pi, pi_eps
 
-def precompute_bubbles(energije, Gamma, mu, T, L, nodes, weights, omegas):
+def precompute_bubbles(energije, Gamma, mu, T, nodes, weights, omegas):
     Nk = energije.shape[-1]
     mu_ = mu / Gamma
     invt = Gamma / T
@@ -1774,3 +1816,71 @@ def recommend_L_deg(invt, mu_, bandwidth=None, alpha_L=8.0, alpha_deg=10.0, deg_
     deg = max(deg, deg_min)
 
     return L, deg
+
+
+def find_flat_regime(omegas, chi_omega, window=10):
+    """
+    Find flattest window in dchi_domega, using sliding window in LOG omega space.
+    Relative std (std/|mean|) is minimized in the flat region.
+    """
+    dchi_domega = np.gradient(chi_omega, omegas)
+    n          = len(omegas)
+    rel_std    = np.full(n, np.nan)
+
+    for i in range(n - window):
+        chunk      = dchi_domega[i : i + window]
+        mean       = np.mean(chunk)
+        std        = np.std(chunk)
+        rel_std[i] = std / np.abs(mean)
+
+    # Best window = minimum relative std
+    best_start = np.nanargmin(rel_std)
+    best_end   = best_start + window
+
+    # Expand window outward as long as rel_std stays low
+    threshold = rel_std[best_start] * 3   # allow 3x the minimum rel_std
+    
+    # expand left
+    left = best_start
+    while left > 0 and rel_std[left - 1] < threshold:
+        left -= 1
+    
+    # expand right
+    right = best_end
+    while right < n - window and rel_std[right] < threshold:
+        right += 1
+
+    return left, right
+
+
+def get_dc_coefficient(omegas, chi_imag, omega_cutoff=None):
+    """
+    Get DC coefficient (alpha = chi_imag / omega as omega -> 0)
+    for log-spaced omega arrays using weighted linear regression.
+    
+    Fits: chi_imag = alpha * omega + beta * omega^3
+    Weights = 1/omega to ensure equal contribution per decade.
+    """
+    
+    # Select low-frequency window
+    if omega_cutoff is None:
+        log_min = np.log10(omegas.min())
+        log_max = np.log10(omegas.max())
+        omega_cutoff = 10 ** (log_min + 0.2 * (log_max - log_min))
+    
+    mask = omegas <= omega_cutoff
+    w    = 1.0 / omegas[mask]          # weights: uniform per decade
+    x    = omegas[mask]
+    y    = chi_imag[mask]
+
+    # Weighted least squares: chi_imag = alpha * omega + beta * omega^3
+    # Design matrix
+    A  = np.column_stack([x, x**3])
+    Aw = A * w[:, None]                # apply weights to rows
+    yw = y * w
+
+    # Solve weighted normal equations
+    coeffs, _, _, _ = np.linalg.lstsq(Aw, yw, rcond=None)
+    alpha, beta = coeffs
+
+    return alpha, beta
