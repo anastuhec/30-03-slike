@@ -329,11 +329,9 @@ def Rho_next_full(hk0, rho, K, T, mu, phys_parameters, eps0,
 
 ''' functions for determining chemical potential for half-filling '''
 def f_newmu(mu, hk0, rho, K, T, phys_parameters, eps0,
-            epsilon_threshold, N_epsilon, maxiter, include_hartree, mix=0.50):
+            epsilon_threshold, N_epsilon, maxiter, include_hartree, mix=0.50, n_target=1.0):
     _, _, _, _, _, n = Rho_next(hk0, rho, K, T, mu, phys_parameters, eps0, epsilon_threshold, N_epsilon, maxiter, include_hartree, mix)
-    #rho_tmp, n = Rho_next_fast(hk0, rho, K, T, mu, phys_parameters, eps0,
-    #                           N_epsilon, include_hartree, mix, maxiter_fast=maxiter_fast)
-    return n - 1
+    return n - n_target
 
 def find_bracket(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
                  epsilon_threshold, N_epsilon, maxiter, include_hartree, mix,
@@ -368,7 +366,7 @@ def find_bracket(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
     )
 
 def NewMu2(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
-             epsilon_threshold, N_epsilon, maxiter, include_hartree, mix=0.5, xtol=1e-4, rtol=1e-4, maxiterbrentq=50):
+             epsilon_threshold, N_epsilon, maxiter, include_hartree, mix=0.5, xtol=1e-4, rtol=1e-4, maxiterbrentq=50, n_target=1.0):
     # Auto-fix bracket if needed
     try:
         mu1, mu2 = find_bracket(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
@@ -377,7 +375,7 @@ def NewMu2(mu1, mu2, hk0, rho, K, T, phys_parameters, eps0,
         print(f"Warning: {e}")
         raise
     mu_star = brentq(f_newmu, mu1, mu2, args=(hk0, rho, K, T, phys_parameters, eps0,
-                                              epsilon_threshold, N_epsilon, maxiter, include_hartree, mix),
+                                              epsilon_threshold, N_epsilon, maxiter, include_hartree, mix, n_target),
                      xtol=xtol, rtol=rtol, maxiter=maxiterbrentq)
     rho_final, err, energije, vecs, fs, n = Rho_next_full(hk0, rho, K, T, mu_star, phys_parameters, eps0, epsilon_threshold, N_epsilon,
                                                           maxiter, include_hartree, mix=mix)
